@@ -49,7 +49,7 @@ func main() {
 
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		fmt.Printf("%v\n", err.Error())
+		panic(err)
 	}
 
 	results := make(chan Result)
