@@ -1,5 +1,5 @@
 # git-pull
-A small CLI tool to safely pull multiple Git repositories, skipping any with local changes.
+A small CLI tool to safely run git pull across multiple local Git repositories, skipping those with local modifications.
 
 ## Installation
 
