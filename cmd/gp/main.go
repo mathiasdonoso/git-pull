@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"text/tabwriter"
+	"time"
 )
 
 type RepositoryState int
@@ -47,6 +48,10 @@ func main() {
 		root = os.Args[1]
 	}
 
+	// default to 500 requests per minute due to gitlab rate limit on ssh operations
+	ticker := time.NewTicker(2 * time.Millisecond)
+	defer ticker.Stop()
+
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		panic(err)
@@ -68,6 +73,7 @@ func main() {
 		}
 
 		workers++
+		<-ticker.C
 		go PullIfClean(path, results)
 	}
 
