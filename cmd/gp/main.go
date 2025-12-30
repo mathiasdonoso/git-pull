@@ -48,8 +48,8 @@ func main() {
 		root = os.Args[1]
 	}
 
-	// default to 500 requests per minute due to gitlab rate limit on ssh operations
-	ticker := time.NewTicker(2 * time.Millisecond)
+	// default to 480 requests per minute due to gitlab rate limit on ssh operations
+	ticker := time.NewTicker(125 * time.Millisecond)
 	defer ticker.Stop()
 
 	entries, err := os.ReadDir(root)
