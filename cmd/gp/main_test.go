@@ -117,6 +117,7 @@ func TestRepositoryState_String(t *testing.T) {
 		{"updated", Updated, "updated"},
 		{"skipped", Skipped, "skipped (dirty)"},
 		{"pull failed", PullFailed, "pull failed"},
+		{"errored", Errored, "error"},
 		{"unknown state", RepositoryState(99), "?"},
 	}
 	for _, tt := range tests {
@@ -152,6 +153,21 @@ func TestIsRepository(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			// A subdirectory inside a repo is inside the work tree but is not
+			// itself a repo root, so it must not be treated as a repository.
+			name: "subdirectory of a repository",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				initGitRepo(t, dir)
+				sub := filepath.Join(dir, "sub")
+				if err := os.Mkdir(sub, 0755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				return sub
+			},
+			want: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -172,12 +188,12 @@ func TestPullIfClean(t *testing.T) {
 		wantState RepositoryState
 	}{
 		{
-			name: "git status error returns skipped",
+			name: "git status error returns errored",
 			// A plain directory (not a repo) makes `git status --porcelain` exit non-zero.
 			setup: func(t *testing.T) string {
 				return t.TempDir()
 			},
-			wantState: Skipped,
+			wantState: Errored,
 		},
 		{
 			name: "dirty repo is skipped",
