@@ -18,12 +18,18 @@ const (
 	Updated RepositoryState = iota
 	Skipped
 	PullFailed
+	Errored
+	RateLimited
+	SkippedHTTP
 )
 
 var stateName = map[RepositoryState]string{
-	Updated:    "updated",
-	Skipped:    "skipped (dirty)",
-	PullFailed: "pull failed",
+	Updated:     "updated",
+	Skipped:     "skipped (dirty)",
+	PullFailed:  "pull failed",
+	Errored:     "error",
+	RateLimited: "rate limited",
+	SkippedHTTP: "skipped (http remote)",
 }
 
 type Result struct {
@@ -48,8 +54,8 @@ func main() {
 		root = os.Args[1]
 	}
 
-	// default to 480 requests per minute due to gitlab rate limit on ssh operations
-	ticker := time.NewTicker(125 * time.Millisecond)
+	// default to 250 requests per minute to stay well under gitlab's ssh rate limit
+	ticker := time.NewTicker(240 * time.Millisecond)
 	defer ticker.Stop()
 
 	entries, err := os.ReadDir(root)
@@ -102,8 +108,8 @@ func initLogger() {
 }
 
 func IsRepository(root string) bool {
-	slog.Debug("running: git rev-parse --is-inside-work-tree")
-	c := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	slog.Debug("running: git rev-parse --show-toplevel")
+	c := exec.Command("git", "rev-parse", "--show-toplevel")
 	c.Dir = root
 
 	stdout, err := c.CombinedOutput()
@@ -111,24 +117,57 @@ func IsRepository(root string) bool {
 		return false
 	}
 
-	slog.Debug(fmt.Sprintf("output: %v", stdout))
+	slog.Debug(fmt.Sprintf("output: %s", stdout))
 
-	clean := bytes.TrimSpace(stdout)
+	toplevel := string(bytes.TrimSpace(stdout))
 
-	return bytes.Equal(clean, []byte("true"))
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return false
+	}
+
+	return toplevel == resolved
+}
+
+func isHTTPRemote(root string) bool {
+	slog.Debug("running: git remote get-url origin")
+	c := exec.Command("git", "remote", "get-url", "origin")
+	c.Dir = root
+
+	stdout, err := c.CombinedOutput()
+	if err != nil {
+		return false
+	}
+
+	url := bytes.TrimSpace(stdout)
+
+	return bytes.HasPrefix(url, []byte("http://")) || bytes.HasPrefix(url, []byte("https://"))
 }
 
 func PullIfClean(root string, res chan<- Result) {
+	if isHTTPRemote(root) {
+		slog.Debug(fmt.Sprintf("repo %s uses an http(s) remote, skipping", root))
+		res <- Result{
+			Path:  root,
+			State: SkippedHTTP,
+		}
+		return
+	}
+
 	slog.Debug("running: git status --porcelain")
 	c := exec.Command("git", "status", "--porcelain")
 	c.Dir = root
 	stdout, err := c.CombinedOutput()
 
 	if err != nil {
-		slog.Debug(fmt.Sprintf("repo %s not clean with error: %v", root, err))
+		slog.Debug(fmt.Sprintf("repo %s status check failed with error: %v", root, err))
 		res <- Result{
 			Path:  root,
-			State: Skipped,
+			State: Errored,
 		}
 		return
 	}
@@ -145,12 +184,16 @@ func PullIfClean(root string, res chan<- Result) {
 	slog.Debug("running: git pull --ff-only")
 	p := exec.Command("git", "pull", "--ff-only")
 	p.Dir = root
-	_, err = p.CombinedOutput()
+	out, err := p.CombinedOutput()
 	if err != nil {
-		slog.Debug(fmt.Sprintf("repo %s failed to git pull with error: %v", root, err))
+		state := PullFailed
+		if isRateLimited(out) {
+			state = RateLimited
+		}
+		slog.Debug(fmt.Sprintf("repo %s failed to git pull (%s) with error: %v", root, state, err))
 		res <- Result{
 			Path:  root,
-			State: PullFailed,
+			State: state,
 		}
 		return
 	}
@@ -160,3 +203,22 @@ func PullIfClean(root string, res chan<- Result) {
 		State: Updated,
 	}
 }
+
+// rateLimitSignatures are substrings GitLab emits when an SSH operation is
+// throttled. Matched case-insensitively against the failed pull's output.
+var rateLimitSignatures = [][]byte{
+	[]byte("rate limit"),
+	[]byte("too many requests"),
+	[]byte("429"),
+}
+
+func isRateLimited(out []byte) bool {
+	lower := bytes.ToLower(out)
+	for _, sig := range rateLimitSignatures {
+		if bytes.Contains(lower, sig) {
+			return true
+		}
+	}
+	return false
+}
+

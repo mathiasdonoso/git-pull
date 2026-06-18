@@ -117,6 +117,9 @@ func TestRepositoryState_String(t *testing.T) {
 		{"updated", Updated, "updated"},
 		{"skipped", Skipped, "skipped (dirty)"},
 		{"pull failed", PullFailed, "pull failed"},
+		{"errored", Errored, "error"},
+		{"rate limited", RateLimited, "rate limited"},
+		{"skipped http", SkippedHTTP, "skipped (http remote)"},
 		{"unknown state", RepositoryState(99), "?"},
 	}
 	for _, tt := range tests {
@@ -152,6 +155,21 @@ func TestIsRepository(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			// A subdirectory inside a repo is inside the work tree but is not
+			// itself a repo root, so it must not be treated as a repository.
+			name: "subdirectory of a repository",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				initGitRepo(t, dir)
+				sub := filepath.Join(dir, "sub")
+				if err := os.Mkdir(sub, 0755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				return sub
+			},
+			want: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -172,12 +190,26 @@ func TestPullIfClean(t *testing.T) {
 		wantState RepositoryState
 	}{
 		{
-			name: "git status error returns skipped",
+			name: "git status error returns errored",
 			// A plain directory (not a repo) makes `git status --porcelain` exit non-zero.
 			setup: func(t *testing.T) string {
 				return t.TempDir()
 			},
-			wantState: Skipped,
+			wantState: Errored,
+		},
+		{
+			name: "http remote is skipped",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				initGitRepo(t, dir)
+				c := exec.Command("git", "remote", "add", "origin", "https://example.com/x.git")
+				c.Dir = dir
+				if out, err := c.CombinedOutput(); err != nil {
+					t.Fatalf("git remote add: %v\n%s", err, out)
+				}
+				return dir
+			},
+			wantState: SkippedHTTP,
 		},
 		{
 			name: "dirty repo is skipped",
@@ -221,6 +253,29 @@ func TestPullIfClean(t *testing.T) {
 			}
 			if got.Path != dir {
 				t.Errorf("path = %q, want %q", got.Path, dir)
+			}
+		})
+	}
+}
+
+// ── isRateLimited ─────────────────────────────────────────────────────────────
+
+func TestIsRateLimited(t *testing.T) {
+	tests := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{"gitlab rate limit message", "remote: Rate limit exceeded, please wait", true},
+		{"too many requests", "ERROR: Too Many Requests", true},
+		{"http 429", "fatal: unable to access: The requested URL returned error: 429", true},
+		{"ordinary non-fast-forward", "fatal: Not possible to fast-forward, aborting.", false},
+		{"empty output", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRateLimited([]byte(tt.out)); got != tt.want {
+				t.Errorf("isRateLimited(%q) = %v, want %v", tt.out, got, tt.want)
 			}
 		})
 	}
